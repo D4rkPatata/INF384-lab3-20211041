@@ -2,19 +2,26 @@
 # Contiene cinco malas practicas deliberadas. Cada una lleva su numero en la
 # linea anterior. Corregirlas es el bloque A1 de la guia del laboratorio.
 
-# defecto 1
-FROM public.ecr.aws/lambda/nodejs:latest
+FROM public.ecr.aws/lambda/nodejs:20 AS builder
 
-# defecto 2
-COPY . .
+WORKDIR /build
 
-# defecto 3
-RUN npm install
+# Copiamos primero el manifiesto y el lock file (defecto 2)
+COPY package.json package-lock.json ./
 
-# defecto 4
-ENV DB_PASSWORD="inf384-clave-en-texto-plano"
+# Instalación reproducible a partir del lock file (defecto 3)
+RUN npm ci --omit=dev
 
-# defecto 5
-RUN dnf install -y procps-ng vim && dnf clean all
+# Recién ahora copiamos el código fuente
+COPY src ./src
+
+FROM public.ecr.aws/lambda/nodejs:20
+
+# Solo se copia el artefacto empaquetado: node_modules resueltos + código.
+COPY --from=builder /build/node_modules ${LAMBDA_TASK_ROOT}/node_modules
+COPY --from=builder /build/src ${LAMBDA_TASK_ROOT}/src
+COPY package.json ${LAMBDA_TASK_ROOT}/
+
+# Sin ENV con credenciales
 
 CMD ["src/handler.handler"]
