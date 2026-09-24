@@ -10,10 +10,12 @@ WORKDIR /build
 COPY package.json package-lock.json ./
 
 # Instalación reproducible a partir del lock file (defecto 3)
-RUN npm ci --omit=dev
+RUN npm ci
 
 # Recién ahora copiamos el código fuente
 COPY src ./src
+
+RUN npm run build
 
 FROM public.ecr.aws/lambda/nodejs:20
 
