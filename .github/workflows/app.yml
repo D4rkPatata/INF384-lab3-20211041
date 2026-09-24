@@ -73,12 +73,31 @@ jobs:
   #
   # Sustituir el paso centinela por la implementacion.
   calidad:
+    needs: pruebas
     runs-on: ubuntu-latest
     steps:
-      - name: Sin implementar
-        run: |
-          echo "::error::El job 'calidad' no esta implementado."
-          exit 1
+      - uses: actions/checkout@v4
+        with:
+          # Historial completo: sin esto Sonar no puede distinguir codigo
+          # nuevo de codigo existente (New Code definition).
+          fetch-depth: 0
+ 
+      - name: Descargar el reporte de cobertura
+        uses: actions/download-artifact@v4
+        with:
+          name: cobertura
+          path: coverage/
+ 
+      - name: Analisis de SonarQube Cloud
+        uses: SonarSource/sonarqube-scan-action@v8
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          # SonarCloud (no self-hosted): host fijo, no requiere secreto propio.
+          SONAR_HOST_URL: https://sonarcloud.io
+        with:
+          args: >
+            -Dsonar.organization=${{ vars.SONAR_ORG }}
+            -Dsonar.projectKey=${{ vars.SONAR_PROJECT_KEY }}
 
   # TODO
   # Buscar credenciales escritas en el codigo y en el historial del repositorio.
@@ -95,10 +114,14 @@ jobs:
   secretos:
     runs-on: ubuntu-latest
     steps:
-      - name: Sin implementar
-        run: |
-          echo "::error::El job 'secretos' no esta implementado."
-          exit 1
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+ 
+      - name: Buscar credenciales con gitleaks
+        uses: gitleaks/gitleaks-action@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # TODO
   # Contrastar el arbol de dependencias declarado en package-lock.json contra
@@ -116,10 +139,44 @@ jobs:
   dependencias:
     runs-on: ubuntu-latest
     steps:
-      - name: Sin implementar
+      - uses: actions/checkout@v4
+ 
+      - name: Analizar package-lock.json con Trivy
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: package-lock.json
+          scanners: vuln
+          format: json
+          output: trivy-report.json
+          exit-code: '0'
+          severity: 'CRITICAL,HIGH,MEDIUM,LOW,UNKNOWN'
+ 
+      - name: Publicar hallazgos sin abrir el log
+        if: always()
         run: |
-          echo "::error::El job 'dependencias' no esta implementado."
-          exit 1
+          total="$(jq '[.Results[]?.Vulnerabilities[]?] | length' trivy-report.json)"
+ 
+          {
+            echo '### dependencias — Trivy (package-lock.json, arbol completo)'
+            echo
+            if [ "$total" -gt 0 ]; then
+              echo "Se encontraron **$total** vulnerabilidades conocidas."
+              echo
+              echo '| Paquete | Version | Vulnerabilidad | Severidad |'
+              echo '|---|---|---|---|'
+              jq -r '.Results[]?.Vulnerabilities[]? |
+                "| \(.PkgName) | \(.InstalledVersion) | \(.VulnerabilityID) | \(.Severity) |"' \
+                trivy-report.json
+            else
+              echo 'No se encontraron vulnerabilidades conocidas.'
+            fi
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+ 
+          if [ "$total" -gt 0 ]; then
+            echo "::warning::dependencias: $total vulnerabilidades conocidas en package-lock.json (no bloqueante, ver resumen)."
+          fi
 
   # TODO
   # Buscar patrones explotables en el codigo fuente.
@@ -131,10 +188,53 @@ jobs:
   estatico:
     runs-on: ubuntu-latest
     steps:
-      - name: Sin implementar
+      - uses: actions/checkout@v4
+ 
+      - name: Analizar el codigo fuente
+        continue-on-error: true
         run: |
-          echo "::error::El job 'estatico' no esta implementado."
-          exit 1
+          docker run --rm \
+            --volume "${PWD}:/src" \
+            --workdir /src \
+            --env SEMGREP_SEND_METRICS=off \
+            semgrep/semgrep \
+            semgrep scan \
+            --config=p/default \
+            --config=p/javascript \
+            --json --quiet \
+            --output=semgrep.json \
+            src/
+ 
+      - name: Publicar hallazgos sin abrir el log
+        if: always()
+        run: |
+          total="$(jq '.results | length' semgrep.json)"
+ 
+          {
+            echo '### estatico — Semgrep'
+            echo
+            if [ "$total" -gt 0 ]; then
+              echo "Se encontraron **$total** hallazgos en el codigo fuente."
+              echo
+              echo '| Archivo | Linea | Regla |'
+              echo '|---|---|---|'
+              jq -r '.results[] | "| \(.path) | \(.start.line) | \(.check_id) |"' semgrep.json
+            else
+              echo 'No se encontraron patrones explotables conocidos.'
+            fi
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+ 
+      - name: Anotar cada hallazgo junto a su linea
+        if: always()
+        run: |
+          jq -c '.results[]' semgrep.json | while read -r hallazgo; do
+            archivo="$(echo "$hallazgo" | jq -r '.path')"
+            linea="$(echo "$hallazgo" | jq -r '.start.line')"
+            regla="$(echo "$hallazgo" | jq -r '.check_id')"
+            mensaje="$(echo "$hallazgo" | jq -r '.extra.message' | tr '\n' ' ' | cut -c1-200)"
+            echo "::warning file=${archivo},line=${linea}::[${regla}] ${mensaje}"
+          done
 
   # TODO
   # Construir la imagen de la aplicacion y publicarla en el registro privado.
