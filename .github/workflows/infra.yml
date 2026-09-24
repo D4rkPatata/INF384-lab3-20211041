@@ -24,11 +24,29 @@ jobs:
   # Sustituir el paso centinela por la implementacion.
   validar:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra
     steps:
-      - name: Sin implementar
-        run: |
-          echo "::error::El job 'validar' no esta implementado."
-          exit 1
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Credenciales temporales
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token:     ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+
+      - name: terraform init
+        run: terraform init -input=false -backend-config=backend.hcl
+
+      - name: terraform validate
+        run: terraform validate
 
   # TODO
   # Analizar el codigo declarado contra politicas de infraestructura.
@@ -54,10 +72,17 @@ jobs:
   politicas:
     runs-on: ubuntu-latest
     steps:
-      - name: Sin implementar
-        run: |
-          echo "::error::El job 'politicas' no esta implementado."
-          exit 1
+      - uses: actions/checkout@v4
+
+      - name: Analisis de configuracion IaC con Trivy
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: config
+          scan-ref: infra
+          # Umbral de detencion: HIGH y CRITICAL detienen el pipeline.
+          severity: 'HIGH,CRITICAL'
+          exit-code: '1'
+          format: table
 
   # TODO
   # Calcular el plan, guardarlo en disco y exportarlo a tfplan.json.
@@ -89,11 +114,78 @@ jobs:
   plan:
     needs: [validar, politicas]
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra
     steps:
-      - name: Sin implementar
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false   # sin esto, "show -json > archivo" sale corrupto
+
+      - name: Credenciales temporales
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token:     ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+
+      - name: terraform init
+        run: terraform init -input=false -backend-config=backend.hcl
+
+      - name: terraform plan
         run: |
-          echo "::error::El job 'plan' no esta implementado."
-          exit 1
+          terraform plan -input=false -out=tfplan
+          terraform show -json tfplan > tfplan.json
+          terraform show -no-color tfplan > tfplan.txt
+
+      - name: Publicar el plan en el resumen
+        if: always()
+        run: |
+          {
+            echo '### plan — terraform'
+            echo '```'
+            cat tfplan.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publicar el plan en el pull request
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          {
+            echo '### Plan de Terraform'
+            echo
+            echo '```'
+            cat tfplan.txt
+            echo '```'
+          } > comentario.md
+          gh pr comment ${{ github.event.pull_request.number }} --body-file comentario.md
+
+      # Compuerta: cualquier delete (incluye reemplazos) detiene el pipeline.
+      - name: Compuerta sobre el plan (destruccion no autorizada)
+        run: |
+          destruidos="$(jq -r '[.resource_changes[]? | select(.change.actions | index("delete"))] | length' tfplan.json)"
+          if [ "$destruidos" -gt 0 ]; then
+            echo "::error::El plan destruye $destruidos recurso(s). Pipeline detenido."
+            jq -r '.resource_changes[]? | select(.change.actions | index("delete")) | "- \(.address): \(.change.actions | join(","))"' tfplan.json
+            {
+              echo '### Compuerta del plan: DETENIDO'
+              jq -r '.resource_changes[]? | select(.change.actions | index("delete")) | "- `\(.address)`: \(.change.actions | join(","))"' tfplan.json
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "Sin destrucciones en el plan."
+
+      - name: Guardar el plan para aplicar
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan
+          path: infra/tfplan
+          if-no-files-found: error
 
   # TODO
   # Aplicar el plan que produjo el job anterior, sin recalcularlo.
@@ -102,10 +194,34 @@ jobs:
   # Sustituir el paso centinela por la implementacion.
   aplicar:
     needs: plan
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra
     steps:
-      - name: Sin implementar
-        run: |
-          echo "::error::El job 'aplicar' no esta implementado."
-          exit 1
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Credenciales temporales
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token:     ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+
+      - name: terraform init
+        run: terraform init -input=false -backend-config=backend.hcl
+
+      - name: Descargar el plan
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan
+          path: infra/
+
+      - name: terraform apply del plan guardado
+        run: terraform apply -input=false tfplan
