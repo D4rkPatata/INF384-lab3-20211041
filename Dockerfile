@@ -18,9 +18,7 @@ COPY src ./src
 FROM public.ecr.aws/lambda/nodejs:20
 
 # Solo se copia el artefacto empaquetado: node_modules resueltos + código.
-COPY --from=builder /build/node_modules ${LAMBDA_TASK_ROOT}/node_modules
-COPY --from=builder /build/src ${LAMBDA_TASK_ROOT}/src
-COPY package.json ${LAMBDA_TASK_ROOT}/
+COPY --from=builder /build/dist/handler.js ${LAMBDA_TASK_ROOT}/handler.js
 
 # Sin ENV con credenciales
 

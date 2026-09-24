@@ -1,12 +1,24 @@
-
 node_modules
+dist
+
 .env
 .env.*
+*.pem
+*.key
+
 .git
 .gitignore
 .github
 
-dist
-build
 *.log
+.DS_Store
 .vscode
+.idea
+
+README.md
+*.md
+tests
+__tests__
+coverage
+
+Dockerfile.*
