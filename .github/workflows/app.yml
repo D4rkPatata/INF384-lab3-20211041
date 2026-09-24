@@ -268,12 +268,90 @@ jobs:
   #
   # Sustituir el paso centinela por la implementacion.
   publicar:
+    # Depende de las cuatro gates. Solo `secretos` puede fallar y cortar aqui;
+    # las otras tres terminan en verde aunque tengan hallazgos.
+    needs: [calidad, secretos, dependencias, estatico]
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    env:
+      APP_NAME: inf384-lab3   # <-- confirmar que es el nombre del repo ECR (ver setup-infra.yml)
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
     steps:
-      - name: Sin implementar
+      - uses: actions/checkout@v4
+
+      - name: Credenciales temporales
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token:     ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+
+      - name: Login al registro privado (ECR)
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Calcular tags
+        id: tags
         run: |
-          echo "::error::El job 'publicar' no esta implementado."
-          exit 1
+          echo "sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Construir la imagen (linux/amd64)
+        env:
+          IMAGE: ${{ steps.ecr.outputs.registry }}/${{ env.APP_NAME }}
+          SHA: ${{ steps.tags.outputs.sha }}
+        run: |
+          docker build \
+            --platform linux/amd64 \
+            --label org.opencontainers.image.title="${APP_NAME}" \
+            --tag "${IMAGE}:${SHA}" \
+            .
+
+      - name: Publicar con el tag del sha y leer el digest
+        id: push
+        env:
+          IMAGE: ${{ steps.ecr.outputs.registry }}/${{ env.APP_NAME }}
+          SHA: ${{ steps.tags.outputs.sha }}
+        run: |
+          docker push "${IMAGE}:${SHA}"
+          # Formato: <registro>/<aplicacion>@sha256:...
+          digest="$(docker inspect --format '{{index .RepoDigests 0}}' "${IMAGE}:${SHA}")"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          echo "### publicar" >> "$GITHUB_STEP_SUMMARY"
+          echo "Digest: \`${digest}\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Apuntar version y prd al mismo manifiesto (sin reenviar capas)
+        env:
+          SHA: ${{ steps.tags.outputs.sha }}
+          VERSION: ${{ steps.tags.outputs.version }}
+        run: |
+          manifest="$(aws ecr batch-get-image --repository-name "$APP_NAME" \
+            --image-ids imageTag="$SHA" --query 'images[0].imageManifest' --output text)"
+          media="$(aws ecr batch-get-image --repository-name "$APP_NAME" \
+            --image-ids imageTag="$SHA" --query 'images[0].imageManifestMediaType' --output text)"
+          digest_sha="$(aws ecr describe-images --repository-name "$APP_NAME" \
+            --image-ids imageTag="$SHA" --query 'imageDetails[0].imageDigest' --output text)"
+
+          poner_tag() {
+            out="$(aws ecr put-image --repository-name "$APP_NAME" --image-tag "$1" \
+              --image-manifest "$manifest" --image-manifest-media-type "$media" 2>&1)" \
+            || { echo "$out" | grep -q ImageAlreadyExistsException || { echo "$out"; exit 1; }; }
+          }
+
+          # version: no se reasigna. Si ya existe apuntando a otro digest, no se toca.
+          actual="$(aws ecr describe-images --repository-name "$APP_NAME" \
+            --image-ids imageTag="$VERSION" --query 'imageDetails[0].imageDigest' \
+            --output text 2>/dev/null || true)"
+          if [ -n "$actual" ] && [ "$actual" != "None" ] && [ "$actual" != "$digest_sha" ]; then
+            echo "::warning::El tag $VERSION ya apunta a otro manifiesto; no se reasigna. Sube la version en package.json."
+          else
+            poner_tag "$VERSION"
+          fi
+
+          # prd: movil, siempre apunta a lo ultimo publicado
+          poner_tag prd
 
   # Este job viene completo y no se modifica.
   # Las estrategias de despliegue y la verificacion posterior son contenido
